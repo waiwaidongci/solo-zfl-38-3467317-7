@@ -111,7 +111,7 @@ try {
   const b = r.json.items.find(i => i.code === "B-1");
   check("未交付项目退回校准", a.status === "校准中" && a.locked === true);
   check("旧测量记录保留", a.tasks[0].measurements.length === 1 && a.tasks[0].reviews.length === 1);
-  check("已交付项目只标风险不改状态", b.status === "已交付" && b.risk && b.risk.batchId === batchId);
+  check("已交付项目只标风险不改状态", b.status === "已交付" && b.risks.length === 1 && b.risks[0].batchId === batchId);
   check("量具已停用", r.json.gauges.find(g => g.id === "G-1").state === "停用");
 
   r = await req(`/api/items/${itemA}`, { method: "PATCH", body: { status: "待复核" } });
@@ -136,13 +136,64 @@ try {
   r = await req(`/api/items/${itemA}`, { method: "PATCH", body: { status: "待复核" } });
   check("复测完成后流程恢复", r.status === 200 && r.json.status === "待复核");
 
+  console.log("== 批次完成后重复复核 ==");
+  r = await req(`/api/items/${itemA}/tasks/${taskA}/review`, { method: "POST", role: "复核员", user: "赵复核", body: { result: "不通过" } });
+  check("批次完成后重复复核被拒(409)", r.status === 409 && r.json.error === "duplicate_review");
+  r = await req("/api/state");
+  check("任务状态未被改回调整中", r.json.items.find(i => i.code === "A-1").tasks[0].status === "已复核");
+  r = await req("/api/batches");
+  check("批次仍为已完成", r.json[0].status === "已完成");
+  r = await req(`/api/items/${itemA}/tasks/${taskA}/measure`, { method: "POST", role: "校准员", user: "李校准", body: { gaugeId: G2, value: "12.3N" } });
+  check("新问题进入新的校准闭环", r.status === 201 && r.json.tasks[0].measurements.at(-1).kind === "校准");
+  r = await req(`/api/items/${itemA}/tasks/${taskA}/review`, { method: "POST", role: "复核员", user: "赵复核", body: { result: "通过" } });
+  check("新测量可正常复核", r.status === 201);
+
+  console.log("== 有效期版本校验 ==");
+  r = await req(`/api/gauges/${G2}`, { method: "PATCH", role: "计量员", user: "王计量", body: { validUntil: "2028-01-01" } });
+  check("不带版本修改被拒(409)", r.status === 409 && r.json.error === "version_conflict");
+  r = await req(`/api/gauges/${G2}`, { method: "PATCH", role: "计量员", user: "王计量", body: { validUntil: "2028-01-01", version: 99 } });
+  check("过期版本修改被拒(409)", r.status === 409 && r.json.error === "version_conflict");
+  r = await req("/api/gauges");
+  check("冲突后有效期未被改动", r.json.find(g => g.id === G2).validUntil === "2027-01-01");
+  r = await req(`/api/gauges/${G2}`, { method: "PATCH", role: "计量员", user: "王计量", body: { validUntil: "2028-01-01", version: 1 } });
+  check("带当前版本修改成功", r.status === 200 && r.json.version === 2 && r.json.validUntil === "2028-01-01");
+  r = await req(`/api/gauges/${G2}`, { method: "PATCH", role: "计量员", user: "王计量", body: { validUntil: "2029-01-01", version: 1 } });
+  check("旧页面重复提交被拒(409)", r.status === 409 && r.json.error === "version_conflict");
+
   console.log("== 过期量具 ==");
-  r = await req(`/api/gauges/${G2}`, { method: "PATCH", role: "计量员", user: "王计量", body: { validUntil: "2020-01-01" } });
-  check("计量员可调整有效期", r.status === 200 && r.json.version === 2);
+  r = await req(`/api/gauges/${G2}`, { method: "PATCH", role: "计量员", user: "王计量", body: { validUntil: "2020-01-01", version: 2 } });
+  check("计量员可调整有效期", r.status === 200 && r.json.version === 3);
   r = await req(`/api/items/${itemA}/tasks/${taskA}/measure`, { method: "POST", role: "校准员", user: "李校准", body: { gaugeId: G2, value: "1N" } });
   check("过期量具测量被拒(409)", r.status === 409 && r.json.error === "gauge_expired");
   r = await req(`/api/gauges/G-1`, { method: "PATCH", role: "计量员", user: "王计量", body: { validUntil: "2030-01-01" } });
   check("已停用量具改有效期被拒(409)", r.status === 409);
+
+  console.log("== 多量具风险 ==");
+  r = await req("/api/gauges", { method: "POST", role: "计量员", user: "王计量", body: { code: "TJ-10", name: "测厚仪", validUntil: "2027-06-01" } });
+  const G3 = r.json.id;
+  r = await req("/api/gauges", { method: "POST", role: "计量员", user: "王计量", body: { code: "TJ-11", name: "张力表", validUntil: "2027-06-01" } });
+  const G4 = r.json.id;
+  r = await req("/api/items", { method: "POST", body: { code: "C-1", shipType: "广船", owner: "周宁", status: "待检查" } });
+  const itemC = r.json.id;
+  r = await req(`/api/items/${itemC}/action`, { method: "POST", body: { position: "尾桅支索", tension: "偏松" } });
+  const taskC = r.json.tasks[0].id;
+  await req(`/api/items/${itemC}/tasks/${taskC}/measure`, { method: "POST", role: "校准员", user: "李校准", body: { gaugeId: G3, value: "8.1N" } });
+  await req(`/api/items/${itemC}/tasks/${taskC}/measure`, { method: "POST", role: "校准员", user: "李校准", body: { gaugeId: G4, value: "8.2N" } });
+  await req(`/api/items/${itemC}`, { method: "PATCH", body: { status: "已交付" } });
+  r = await req(`/api/gauges/${G3}/deactivate-preview`, { method: "POST", role: "计量员", user: "王计量" });
+  const p3 = r.json;
+  r = await req(`/api/gauges/${G3}/deactivate-confirm`, { method: "POST", role: "计量员", user: "王计量", body: { previewId: p3.previewId, gaugeVersion: p3.gaugeVersion } });
+  const batchC1 = r.json.batch.id;
+  r = await req(`/api/gauges/${G4}/deactivate-preview`, { method: "POST", role: "计量员", user: "王计量" });
+  const p4 = r.json;
+  r = await req(`/api/gauges/${G4}/deactivate-confirm`, { method: "POST", role: "计量员", user: "王计量", body: { previewId: p4.previewId, gaugeVersion: p4.gaugeVersion } });
+  const batchC2 = r.json.batch.id;
+  r = await req("/api/state");
+  const c = r.json.items.find(i => i.code === "C-1");
+  check("同一项目保留全部风险", c.risks.length === 2);
+  check("风险分别对应两个量具", c.risks.some(k => k.gaugeId === G3) && c.risks.some(k => k.gaugeId === G4));
+  check("风险分别对应两个批次", batchC1 !== batchC2 && c.risks.some(k => k.batchId === batchC1) && c.risks.some(k => k.batchId === batchC2));
+  check("已交付状态未被改动", c.status === "已交付");
 
   console.log("== 重启持久化 ==");
   await stopServer(server);
@@ -150,10 +201,12 @@ try {
   r = await req("/api/state");
   const a2 = r.json.items.find(i => i.code === "A-1");
   const b2 = r.json.items.find(i => i.code === "B-1");
-  check("重启后批次仍在", r.json.batches.length === 1 && r.json.batches[0].status === "已完成");
+  const c2 = r.json.items.find(i => i.code === "C-1");
+  check("重启后批次仍在", r.json.batches.length === 3 && r.json.batches.every(x => x.status === "已完成"));
   check("重启后量具状态仍在", r.json.gauges.find(g => g.id === "G-1").state === "停用");
-  check("重启后测量与复核记录仍在", a2.tasks[0].measurements.length === 3 && a2.tasks[0].reviews.length === 3);
-  check("重启后风险标记仍在", b2.risk && b2.risk.batchId === batchId);
+  check("重启后测量与复核记录仍在", a2.tasks[0].measurements.length === 4 && a2.tasks[0].reviews.length === 4);
+  check("重启后风险标记仍在", b2.risks.length === 1 && b2.risks[0].batchId === batchId);
+  check("重启后多风险仍在", c2.risks.length === 2);
   await stopServer(server);
 } catch (e) {
   failed++;

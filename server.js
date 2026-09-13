@@ -60,6 +60,8 @@ async function loadDb() {
     item.id ||= item.code;
     item.tasks ||= [];
     item.logs ||= [];
+    item.risks ||= (item.risk ? [item.risk] : []);
+    delete item.risk;
     for (const task of item.tasks) {
       task.measurements ||= [];
       task.reviews ||= [];
@@ -280,15 +282,27 @@ function page() {
     function renderStats() {
       const stats = Object.fromEntries(stages.map(s => [s, items.filter(i => i.status === s).length]));
       stats['复测批次'] = batches.filter(b => b.status === '复测中').length;
-      stats['风险项目'] = items.filter(i => i.risk).length;
+      stats['风险项目'] = items.filter(i => (i.risks || []).length > 0).length;
       $('#stats').innerHTML = Object.entries(stats).map(([k,v]) => '<div class="stat"><span>'+k+'</span><strong>'+v+'</strong></div>').join('');
     }
     function renderGauges() {
       $('#gauges').innerHTML = gauges.length ? gauges.map(g =>
         '<div class="gauge-row"><b>'+esc(g.code)+'</b><span>'+esc(g.name)+'</span><span class="meta">有效期至 '+esc(g.validUntil)+'</span><span class="pill'+(g.state==='在用'?'':' warnpill')+'">'+g.state+'</span><span class="meta">v'+g.version+'</span>'+
-        (g.status === '在用' ? '<button class="danger" data-deact="'+esc(g.id)+'">停用</button>' : '<span class="meta">停用于 '+esc((g.deactivatedAt||'').slice(0,10))+'</span>')+'</div>'
+        (g.status === '在用' ? '<button class="secondary" data-edit="'+esc(g.id)+'">改期</button><button class="danger" data-deact="'+esc(g.id)+'">停用</button>' : '<span class="meta">停用于 '+esc((g.deactivatedAt||'').slice(0,10))+'</span>')+'</div>'
       ).join('') : '<div class="meta">暂无量具，请计量员先登记。</div>';
       document.querySelectorAll('[data-deact]').forEach(btn => btn.onclick = () => deactivatePreview(btn.dataset.deact));
+      document.querySelectorAll('[data-edit]').forEach(btn => btn.onclick = () => editValidity(btn.dataset.edit));
+    }
+    async function editValidity(id) {
+      const g = gauges.find(x => x.id === id);
+      if (!g) return;
+      const d = prompt('新的有效期（YYYY-MM-DD）', g.validUntil);
+      if (!d) return;
+      try {
+        await api('/api/gauges/'+id, { method:'PATCH', body: JSON.stringify({ validUntil: d, version: g.version }) });
+        showMsg('量具 '+g.code+' 有效期已更新', true);
+        await load();
+      } catch (e) { showMsg(e.message); await load(); }
     }
     function renderBatches() {
       $('#batches').innerHTML = batches.length ? batches.map(b => {
@@ -308,12 +322,12 @@ function page() {
         if (status && item.status !== status) return false;
         if (ow && item.owner !== ow) return false;
         if (gf) {
-          const hit = (item.tasks || []).some(t => (t.measurements || []).some(m => m.gaugeId === gf)) || (item.risk && item.risk.gaugeId === gf);
+          const hit = (item.tasks || []).some(t => (t.measurements || []).some(m => m.gaugeId === gf)) || (item.risks || []).some(k => k.gaugeId === gf);
           if (!hit) return false;
         }
         if (rk === '复测中' && !item.locked) return false;
-        if (rk === '有风险' && !item.risk) return false;
-        if (rk === '正常' && (item.risk || item.locked)) return false;
+        if (rk === '有风险' && !(item.risks || []).length) return false;
+        if (rk === '正常' && ((item.risks || []).length || item.locked)) return false;
         if (q && !JSON.stringify(item).includes(q)) return false;
         return true;
       });
@@ -326,7 +340,7 @@ function page() {
         const rt = t.retest ? '<span class="pill'+(t.retest.state==='已复核'?'':' warnpill')+'">复测:'+t.retest.state+'</span>' : '';
         return '<div class="task"><div class="meta"><b>任务</b> '+esc(t.position)+' · '+esc(t.status)+' · '+esc(t.tension)+' '+rt+'</div>'+ms+rs+'</div>';
       }).join('');
-      const risk = item.risk ? '<div class="warn">风险：量具 '+esc(item.risk.gaugeCode)+' 已停用（批次 '+esc(item.risk.batchId)+'），交付记录待评估，历史未改动</div>' : '';
+      const risk = (item.risks || []).map(k => '<div class="warn">风险：量具 '+esc(k.gaugeCode)+' 已停用（批次 '+esc(k.batchId)+'），交付记录待评估，历史未改动</div>').join('');
       const locked = item.locked ? '<div class="warn">复测中（批次 '+esc(item.lockBatchId)+'），完成前不能推进到待复核/已交付</div>' : '';
       const logs = (item.logs || []).slice(-4).map(l => '<div>'+esc(l.step)+'：'+esc(l.note)+'</div>').join('');
       return '<article class="card"><h3>'+esc(item.code || item.id)+'</h3><span class="pill">'+esc(item.status)+'</span>'+main+risk+locked+tasks+
@@ -473,6 +487,9 @@ const server = http.createServer(async (req, res) => {
         const gauge = findGauge(db, gaugePatch[1]);
         if (!gauge) throw new HttpError(404, "gauge_not_found", "量具不存在");
         if (gauge.status === "停用") throw new HttpError(409, "deactivated", "量具已停用，不能再修改有效期");
+        if (Number(input.version) !== gauge.version) {
+          throw new HttpError(409, "version_conflict", "量具信息已变更（提交版本 " + (input.version === undefined ? "缺失" : "v" + input.version) + "，当前 v" + gauge.version + "），请刷新后重试");
+        }
         const validUntil = String(input.validUntil || "").trim();
         if (!/^\d{4}-\d{2}-\d{2}$/.test(validUntil)) throw new HttpError(400, "invalid_date", "有效期格式应为 YYYY-MM-DD");
         gauge.validUntil = validUntil;
@@ -534,7 +551,8 @@ const server = http.createServer(async (req, res) => {
         for (const { item, task } of affectedByGauge(db, gauge.id)) {
           if (item.status === "已交付") {
             batch.entries.push({ itemId: item.id, itemCode: item.code, taskId: task.id, position: task.position, owner: item.owner, disposition: "标风险", state: "已标记" });
-            item.risk = { batchId: batch.id, gaugeId: gauge.id, gaugeCode: gauge.code, note: "量具 " + gauge.code + " 已停用，交付记录存在风险", at: now };
+            item.risks ||= [];
+            item.risks.push({ batchId: batch.id, gaugeId: gauge.id, gaugeCode: gauge.code, note: "量具 " + gauge.code + " 已停用，交付记录存在风险", at: now });
             item.logs.push({ at: now, step: "风险", note: "量具 " + gauge.code + " 停用，批次 " + batch.id + " 标记风险（历史不变）" });
           } else {
             batch.entries.push({ itemId: item.id, itemCode: item.code, taskId: task.id, position: task.position, owner: item.owner, disposition: "退回校准", state: "待复测" });
@@ -605,6 +623,9 @@ const server = http.createServer(async (req, res) => {
         if (!["通过", "不通过"].includes(result)) throw new HttpError(400, "invalid_result", "复核结论只能是 通过/不通过");
         const open = task.retest && task.retest.state !== "已复核" ? task.retest : null;
         if (open && open.state === "待复测") throw new HttpError(409, "retest_pending", "请先由校准员完成复测测量再复核");
+        if (!open && task.reviews.length >= task.measurements.length) {
+          throw new HttpError(409, "duplicate_review", "没有待复核的新测量：已完成的复核闭环不接受重复复核，如有新问题请先重新测量进入新的校准闭环");
+        }
         const now = nowIso();
         task.reviews.push({ at: now, reviewer: user, result, note: String(input.note || ""), batchId: open ? open.batchId : undefined });
         if (result === "通过") {
