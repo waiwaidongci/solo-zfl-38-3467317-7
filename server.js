@@ -66,6 +66,12 @@ async function loadDb() {
       task.measurements ||= [];
       task.reviews ||= [];
       task.logs ||= [];
+      for (const m of task.measurements) m.id ||= newId("M");
+      if (task.lastReviewedMeasurementId === undefined) {
+        // 旧数据迁移：按顺序配对，第 i 条复核对应第 i 条测量
+        const idx = Math.min(task.reviews.length, task.measurements.length) - 1;
+        task.lastReviewedMeasurementId = idx >= 0 ? task.measurements[idx].id : null;
+      }
     }
   }
   for (const gauge of db.gauges) { gauge.version ||= 1; gauge.history ||= []; }
@@ -623,11 +629,13 @@ const server = http.createServer(async (req, res) => {
         if (!["通过", "不通过"].includes(result)) throw new HttpError(400, "invalid_result", "复核结论只能是 通过/不通过");
         const open = task.retest && task.retest.state !== "已复核" ? task.retest : null;
         if (open && open.state === "待复测") throw new HttpError(409, "retest_pending", "请先由校准员完成复测测量再复核");
-        if (!open && task.reviews.length >= task.measurements.length) {
-          throw new HttpError(409, "duplicate_review", "没有待复核的新测量：已完成的复核闭环不接受重复复核，如有新问题请先重新测量进入新的校准闭环");
+        const lastMeasurement = task.measurements[task.measurements.length - 1];
+        if (task.lastReviewedMeasurementId === lastMeasurement.id) {
+          throw new HttpError(409, "duplicate_review", "最后一次测量已有复核结论：批次完成后不接受重复结论，任务、批次和记录均不变；如有新问题请先重新测量再复核");
         }
         const now = nowIso();
-        task.reviews.push({ at: now, reviewer: user, result, note: String(input.note || ""), batchId: open ? open.batchId : undefined });
+        task.reviews.push({ at: now, reviewer: user, result, note: String(input.note || ""), batchId: open ? open.batchId : undefined, measurementId: lastMeasurement.id });
+        task.lastReviewedMeasurementId = lastMeasurement.id;
         if (result === "通过") {
           task.status = "已复核";
           if (open) {

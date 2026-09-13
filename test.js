@@ -160,6 +160,65 @@ try {
   r = await req(`/api/gauges/${G2}`, { method: "PATCH", role: "计量员", user: "王计量", body: { validUntil: "2029-01-01", version: 1 } });
   check("旧页面重复提交被拒(409)", r.status === 409 && r.json.error === "version_conflict");
 
+  console.log("== 复核守卫：原始测量未审路径 ==");
+  r = await req("/api/gauges", { method: "POST", role: "计量员", user: "王计量", body: { code: "TJ-20", name: "秒表", validUntil: "2027-06-01" } });
+  const G5 = r.json.id;
+  r = await req("/api/items", { method: "POST", body: { code: "D-1", shipType: "福船", owner: "周宁", status: "待检查" } });
+  const itemD = r.json.id;
+  r = await req(`/api/items/${itemD}/action`, { method: "POST", body: { position: "中桅支索", tension: "偏松" } });
+  const taskD = r.json.tasks[0].id;
+  await req(`/api/items/${itemD}/tasks/${taskD}/measure`, { method: "POST", role: "校准员", user: "李校准", body: { gaugeId: G5, value: "7.1N" } });
+  r = await req(`/api/gauges/${G5}/deactivate-preview`, { method: "POST", role: "计量员", user: "王计量" });
+  const pD = r.json;
+  r = await req(`/api/gauges/${G5}/deactivate-confirm`, { method: "POST", role: "计量员", user: "王计量", body: { previewId: pD.previewId, gaugeVersion: pD.gaugeVersion } });
+  const batchD = r.json.batch.id;
+  check("原始测量未复核也可停用退回", r.status === 201 && r.json.batch.entries[0].disposition === "退回校准");
+  await req(`/api/items/${itemD}/tasks/${taskD}/measure`, { method: "POST", role: "校准员", user: "李校准", body: { gaugeId: G2, value: "7.2N" } });
+  r = await req(`/api/items/${itemD}/tasks/${taskD}/review`, { method: "POST", role: "复核员", user: "赵复核", body: { result: "通过" } });
+  check("复测通过", r.status === 201);
+  r = await req("/api/batches");
+  check("未审路径批次已完成", r.json.find(b => b.id === batchD).status === "已完成");
+  r = await req(`/api/items/${itemD}/tasks/${taskD}/review`, { method: "POST", role: "复核员", user: "赵复核", body: { result: "不通过" } });
+  check("完成后重复结论被拒(409)", r.status === 409 && r.json.error === "duplicate_review");
+  r = await req("/api/state");
+  const dTask = r.json.items.find(i => i.code === "D-1").tasks[0];
+  check("任务保持已复核不改回", dTask.status === "已复核");
+  check("复核记录未增加", dTask.reviews.length === 1);
+  r = await req("/api/batches");
+  check("批次保持已完成", r.json.find(b => b.id === batchD).status === "已完成");
+  r = await req(`/api/items/${itemD}/tasks/${taskD}/measure`, { method: "POST", role: "校准员", user: "李校准", body: { gaugeId: G2, value: "7.3N" } });
+  check("新问题重新测量进入新闭环", r.status === 201 && r.json.tasks[0].measurements.at(-1).kind === "校准");
+  r = await req(`/api/items/${itemD}/tasks/${taskD}/review`, { method: "POST", role: "复核员", user: "赵复核", body: { result: "通过" } });
+  check("新测量可复核", r.status === 201);
+
+  console.log("== 复核守卫：原始测量已审路径 ==");
+  r = await req("/api/gauges", { method: "POST", role: "计量员", user: "王计量", body: { code: "TJ-21", name: "深度尺", validUntil: "2027-06-01" } });
+  const G6 = r.json.id;
+  r = await req("/api/items", { method: "POST", body: { code: "E-1", shipType: "沙船", owner: "陈帆", status: "待检查" } });
+  const itemE = r.json.id;
+  r = await req(`/api/items/${itemE}/action`, { method: "POST", body: { position: "前桅升帆索", tension: "偏紧" } });
+  const taskE = r.json.tasks[0].id;
+  await req(`/api/items/${itemE}/tasks/${taskE}/measure`, { method: "POST", role: "校准员", user: "李校准", body: { gaugeId: G6, value: "5.1N" } });
+  await req(`/api/items/${itemE}/tasks/${taskE}/review`, { method: "POST", role: "复核员", user: "赵复核", body: { result: "通过" } });
+  r = await req(`/api/gauges/${G6}/deactivate-preview`, { method: "POST", role: "计量员", user: "王计量" });
+  const pE = r.json;
+  r = await req(`/api/gauges/${G6}/deactivate-confirm`, { method: "POST", role: "计量员", user: "王计量", body: { previewId: pE.previewId, gaugeVersion: pE.gaugeVersion } });
+  const batchE = r.json.batch.id;
+  await req(`/api/items/${itemE}/tasks/${taskE}/measure`, { method: "POST", role: "校准员", user: "李校准", body: { gaugeId: G2, value: "5.2N" } });
+  r = await req(`/api/items/${itemE}/tasks/${taskE}/review`, { method: "POST", role: "复核员", user: "赵复核", body: { result: "通过" } });
+  check("已审路径复测通过", r.status === 201);
+  r = await req(`/api/items/${itemE}/tasks/${taskE}/review`, { method: "POST", role: "复核员", user: "赵复核", body: { result: "不通过" } });
+  check("完成后重复结论被拒(409)", r.status === 409 && r.json.error === "duplicate_review");
+  r = await req("/api/state");
+  const eTask = r.json.items.find(i => i.code === "E-1").tasks[0];
+  check("任务保持已复核不改回", eTask.status === "已复核");
+  check("复核记录未增加", eTask.reviews.length === 2);
+  r = await req("/api/batches");
+  check("批次保持已完成", r.json.find(b => b.id === batchE).status === "已完成");
+  await req(`/api/items/${itemE}/tasks/${taskE}/measure`, { method: "POST", role: "校准员", user: "李校准", body: { gaugeId: G2, value: "5.3N" } });
+  r = await req(`/api/items/${itemE}/tasks/${taskE}/review`, { method: "POST", role: "复核员", user: "赵复核", body: { result: "通过" } });
+  check("新测量可复核", r.status === 201);
+
   console.log("== 过期量具 ==");
   r = await req(`/api/gauges/${G2}`, { method: "PATCH", role: "计量员", user: "王计量", body: { validUntil: "2020-01-01", version: 2 } });
   check("计量员可调整有效期", r.status === 200 && r.json.version === 3);
@@ -195,6 +254,25 @@ try {
   check("风险分别对应两个批次", batchC1 !== batchC2 && c.risks.some(k => k.batchId === batchC1) && c.risks.some(k => k.batchId === batchC2));
   check("已交付状态未被改动", c.status === "已交付");
 
+  console.log("== 并发确认 ==");
+  r = await req("/api/gauges", { method: "POST", role: "计量员", user: "王计量", body: { code: "TJ-12", name: "游标卡尺", validUntil: "2027-06-01" } });
+  const G7 = r.json.id;
+  r = await req("/api/items", { method: "POST", body: { code: "F-1", shipType: "鸟船", owner: "陈帆", status: "待检查" } });
+  const itemF = r.json.id;
+  r = await req(`/api/items/${itemF}/action`, { method: "POST", body: { position: "首斜桅支索", tension: "偏松" } });
+  const taskF = r.json.tasks[0].id;
+  await req(`/api/items/${itemF}/tasks/${taskF}/measure`, { method: "POST", role: "校准员", user: "李校准", body: { gaugeId: G7, value: "6.6N" } });
+  r = await req(`/api/gauges/${G7}/deactivate-preview`, { method: "POST", role: "计量员", user: "王计量" });
+  const pF = r.json;
+  const [cc1, cc2] = await Promise.all([
+    req(`/api/gauges/${G7}/deactivate-confirm`, { method: "POST", role: "计量员", user: "王计量", body: { previewId: pF.previewId, gaugeVersion: pF.gaugeVersion } }),
+    req(`/api/gauges/${G7}/deactivate-confirm`, { method: "POST", role: "计量员", user: "王计量", body: { previewId: pF.previewId, gaugeVersion: pF.gaugeVersion } })
+  ]);
+  check("并发确认返回同一批次", cc1.json.batch && cc2.json.batch && cc1.json.batch.id === cc2.json.batch.id);
+  check("并发确认一建一复用", [cc1.status, cc2.status].sort().join(",") === "200,201");
+  r = await req("/api/batches");
+  check("并发后只建一个批次", r.json.filter(b => b.gaugeId === G7).length === 1);
+
   console.log("== 重启持久化 ==");
   await stopServer(server);
   server = await startServer();
@@ -202,11 +280,15 @@ try {
   const a2 = r.json.items.find(i => i.code === "A-1");
   const b2 = r.json.items.find(i => i.code === "B-1");
   const c2 = r.json.items.find(i => i.code === "C-1");
-  check("重启后批次仍在", r.json.batches.length === 3 && r.json.batches.every(x => x.status === "已完成"));
+  const d2 = r.json.items.find(i => i.code === "D-1");
+  const f2 = r.json.items.find(i => i.code === "F-1");
+  check("重启后批次仍在", r.json.batches.length === 6 && r.json.batches.filter(x => x.status === "已完成").length === 5 && r.json.batches.filter(x => x.status === "复测中").length === 1);
   check("重启后量具状态仍在", r.json.gauges.find(g => g.id === "G-1").state === "停用");
   check("重启后测量与复核记录仍在", a2.tasks[0].measurements.length === 4 && a2.tasks[0].reviews.length === 4);
   check("重启后风险标记仍在", b2.risks.length === 1 && b2.risks[0].batchId === batchId);
   check("重启后多风险仍在", c2.risks.length === 2);
+  check("重启后复核指针仍在", d2.tasks[0].status === "已复核" && d2.tasks[0].reviews.length === 2);
+  check("重启后未完成批次锁定仍在", f2.locked === true);
   await stopServer(server);
 } catch (e) {
   failed++;
